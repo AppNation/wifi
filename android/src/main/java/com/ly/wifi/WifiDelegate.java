@@ -6,13 +6,17 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.location.LocationManager;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.provider.Settings;
 
 import androidx.core.app.ActivityCompat;
 
@@ -36,6 +40,7 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
     private PermissionManager permissionManager;
     private static final int REQUEST_ACCESS_FINE_LOCATION_PERMISSION = 1;
     private static final int REQUEST_CHANGE_WIFI_STATE_PERMISSION = 2;
+    private static final int REQUEST_SSID_PERMISSION = 3;
     NetworkChangeReceiver networkReceiver;
 
     interface PermissionManager {
@@ -81,6 +86,9 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
             finishWithAlreadyActiveError();
             return;
         }
+        
+        // No permission checks - Flutter handles all permission logic
+        // Native code just calls Android API and returns result
         launchSSID();
     }
 
@@ -93,27 +101,199 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
     }
 
     private void launchSSID() {
-        String wifiName = wifiManager != null ? wifiManager.getConnectionInfo().getSSID().replace("\"", "") : "";
-        if (!wifiName.isEmpty()) {
-            result.success(wifiName);
-            clearMethodCallAndResult();
+        android.util.Log.d("WifiDelegate", "launchSSID() started - Android API: " + Build.VERSION.SDK_INT);
+        
+        // Use modern ConnectivityManager API for Android 10+ (API 29+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getSSIDModern();
         } else {
-            finishWithError("unavailable", "wifi name not available.");
+            // Fallback to legacy WifiManager for Android 9 and below
+            getSSIDLegacy();
         }
+    }
+    
+    /**
+     * Modern method to get SSID using ConnectivityManager + NetworkCapabilities
+     * Works on Android 10+ (API 29+)
+     */
+    private void getSSIDModern() {
+        android.util.Log.d("WifiDelegate", "Using modern ConnectivityManager API");
+        
+        ConnectivityManager connectivityManager = 
+            (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+        
+        if (connectivityManager == null) {
+            finishWithError("unavailable", "ConnectivityManager is not available");
+            return;
+        }
+        
+        Network network = connectivityManager.getActiveNetwork();
+        if (network == null) {
+            android.util.Log.e("WifiDelegate", "No active network");
+            finishWithError("unavailable", "No active network connection");
+            return;
+        }
+        
+        NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
+        if (capabilities == null) {
+            android.util.Log.e("WifiDelegate", "NetworkCapabilities is null");
+            finishWithError("unavailable", "Network capabilities not available");
+            return;
+        }
+        
+        // Check if connected to WiFi
+        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            android.util.Log.e("WifiDelegate", "Not connected to WiFi");
+            finishWithError("unavailable", "Device is not connected to Wi-Fi");
+            return;
+        }
+        
+        // Get WifiInfo from NetworkCapabilities (Android 10+)
+        WifiInfo wifiInfo = (WifiInfo) capabilities.getTransportInfo();
+        if (wifiInfo == null) {
+            android.util.Log.e("WifiDelegate", "WifiInfo from NetworkCapabilities is null");
+            finishWithError("unavailable", "Wi-Fi connection info not available");
+            return;
+        }
+        
+        String wifiName = wifiInfo.getSSID();
+        
+        // Detailed logging
+        android.util.Log.d("WifiDelegate", "Modern API - Raw SSID: '" + wifiName + "'");
+        android.util.Log.d("WifiDelegate", "Modern API - Network ID: " + wifiInfo.getNetworkId());
+        android.util.Log.d("WifiDelegate", "Modern API - BSSID: " + wifiInfo.getBSSID());
+        android.util.Log.d("WifiDelegate", "Modern API - Link Speed: " + wifiInfo.getLinkSpeed());
+        android.util.Log.d("WifiDelegate", "Modern API - RSSI: " + wifiInfo.getRssi());
+        
+        // Check for unknown SSID
+        if (wifiName == null || wifiName.isEmpty() || 
+            wifiName.equals(WifiManager.UNKNOWN_SSID) || 
+            wifiName.equals("<unknown ssid>")) {
+            
+            String detailedError = "Wi-Fi SSID not available via modern API. ";
+            if (wifiName == null) {
+                detailedError += "SSID is null. ";
+            } else if (wifiName.isEmpty()) {
+                detailedError += "SSID is empty. ";
+            } else if (wifiName.equals(WifiManager.UNKNOWN_SSID)) {
+                detailedError += "SSID is UNKNOWN_SSID. ";
+            } else {
+                detailedError += "SSID is '<unknown ssid>'. ";
+            }
+            detailedError += "This usually means location permission is not granted or location services are disabled.";
+            
+            android.util.Log.e("WifiDelegate", detailedError);
+            finishWithError("unavailable", detailedError);
+            return;
+        }
+        
+        // Remove quotes from SSID
+        wifiName = wifiName.replace("\"", "");
+        android.util.Log.d("WifiDelegate", "Modern API - Final SSID: '" + wifiName + "'");
+        result.success(wifiName);
+        clearMethodCallAndResult();
+    }
+    
+    /**
+     * Legacy method to get SSID using WifiManager
+     * Works on Android 9 and below (API 28 and below)
+     */
+    private void getSSIDLegacy() {
+        android.util.Log.d("WifiDelegate", "Using legacy WifiManager API");
+        
+        if (wifiManager == null) {
+            finishWithError("unavailable", "WifiManager is not available");
+            return;
+        }
+        
+        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+        if (wifiInfo == null) {
+            finishWithError("unavailable", "Wi-Fi connection info not available");
+            return;
+        }
+        
+        String wifiName = wifiInfo.getSSID();
+        
+        // Detailed logging
+        android.util.Log.d("WifiDelegate", "Legacy API - Raw SSID: '" + wifiName + "'");
+        android.util.Log.d("WifiDelegate", "Legacy API - Network ID: " + wifiInfo.getNetworkId());
+        android.util.Log.d("WifiDelegate", "Legacy API - IP Address: " + wifiInfo.getIpAddress());
+        android.util.Log.d("WifiDelegate", "Legacy API - BSSID: " + wifiInfo.getBSSID());
+        android.util.Log.d("WifiDelegate", "Legacy API - Link Speed: " + wifiInfo.getLinkSpeed());
+        
+        // Check for unknown SSID
+        if (wifiName == null || wifiName.isEmpty() || 
+            wifiName.equals(WifiManager.UNKNOWN_SSID) || 
+            wifiName.equals("<unknown ssid>")) {
+            
+            String detailedError = "Wi-Fi SSID not available via legacy API. ";
+            if (wifiName == null) {
+                detailedError += "SSID is null. ";
+            } else if (wifiName.isEmpty()) {
+                detailedError += "SSID is empty. ";
+            } else if (wifiName.equals(WifiManager.UNKNOWN_SSID)) {
+                detailedError += "SSID is UNKNOWN (permission issue). ";
+            }
+            
+            android.util.Log.e("WifiDelegate", detailedError);
+            finishWithError("unavailable", detailedError);
+            return;
+        }
+        
+        // Remove quotes from SSID
+        wifiName = wifiName.replace("\"", "");
+        android.util.Log.d("WifiDelegate", "Legacy API - Final SSID: '" + wifiName + "'");
+        result.success(wifiName);
+        clearMethodCallAndResult();
     }
 
     private void launchLevel() {
-        int level = wifiManager != null ? wifiManager.getConnectionInfo().getRssi() : 0;
-        if (level != 0) {
-            if (level <= 0 && level >= -55) {
-                result.success(3);
-            } else if (level < -55 && level >= -80) {
-                result.success(2);
-            } else if (level < -80 && level >= -100) {
-                result.success(1);
-            } else {
-                result.success(0);
+        android.util.Log.d("WifiDelegate", "launchLevel() started - Android API: " + Build.VERSION.SDK_INT);
+        
+        int rssi = 0;
+        
+        // Use modern ConnectivityManager API for Android 10+ (API 29+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ConnectivityManager connectivityManager = 
+                (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+            
+            if (connectivityManager != null) {
+                Network network = connectivityManager.getActiveNetwork();
+                if (network != null) {
+                    NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
+                    if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                        WifiInfo wifiInfo = (WifiInfo) capabilities.getTransportInfo();
+                        if (wifiInfo != null) {
+                            rssi = wifiInfo.getRssi();
+                            android.util.Log.d("WifiDelegate", "Modern API - RSSI: " + rssi);
+                        }
+                    }
+                }
             }
+        } else {
+            // Fallback to legacy WifiManager for Android 9 and below
+            if (wifiManager != null) {
+                WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                if (wifiInfo != null) {
+                    rssi = wifiInfo.getRssi();
+                    android.util.Log.d("WifiDelegate", "Legacy API - RSSI: " + rssi);
+                }
+            }
+        }
+        
+        if (rssi != 0) {
+            int level;
+            if (rssi <= 0 && rssi >= -55) {
+                level = 3;
+            } else if (rssi < -55 && rssi >= -80) {
+                level = 2;
+            } else if (rssi < -80 && rssi >= -100) {
+                level = 1;
+            } else {
+                level = 0;
+            }
+            android.util.Log.d("WifiDelegate", "Wi-Fi level: " + level + " (RSSI: " + rssi + ")");
+            result.success(level);
             clearMethodCallAndResult();
         } else {
             finishWithError("unavailable", "wifi level not available.");
@@ -129,31 +309,95 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
     }
 
     private void launchIP() {
-        NetworkInfo info = ((ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE)).getActiveNetworkInfo();
-        if (info != null && info.isConnected()) {
-            if (info.getType() == ConnectivityManager.TYPE_MOBILE) {
-                try {
-                    for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements(); ) {
-                        NetworkInterface intf = en.nextElement();
-                        for (Enumeration<InetAddress> enumIpAddr = intf.getInetAddresses(); enumIpAddr.hasMoreElements(); ) {
-                            InetAddress inetAddress = enumIpAddr.nextElement();
-                            if (!inetAddress.isLoopbackAddress() && inetAddress instanceof Inet4Address) {
-                                result.success(inetAddress.getHostAddress());
-                                clearMethodCallAndResult();
-                            }
+        android.util.Log.d("WifiDelegate", "launchIP() started - Android API: " + Build.VERSION.SDK_INT);
+        
+        ConnectivityManager connectivityManager = 
+            (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+        
+        if (connectivityManager == null) {
+            finishWithError("unavailable", "ConnectivityManager not available");
+            return;
+        }
+        
+        // Use modern API for Android 10+ (API 29+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Network network = connectivityManager.getActiveNetwork();
+            if (network == null) {
+                finishWithError("unavailable", "No active network");
+                return;
+            }
+            
+            NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
+            if (capabilities == null) {
+                finishWithError("unavailable", "Network capabilities not available");
+                return;
+            }
+            
+            // Check if connected to WiFi
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                WifiInfo wifiInfo = (WifiInfo) capabilities.getTransportInfo();
+                if (wifiInfo != null) {
+                    String ipAddress = intIP2StringIP(wifiInfo.getIpAddress());
+                    android.util.Log.d("WifiDelegate", "Modern API - WiFi IP: " + ipAddress);
+                    result.success(ipAddress);
+                    clearMethodCallAndResult();
+                    return;
+                }
+            }
+            // Check if connected to Mobile
+            else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                android.util.Log.d("WifiDelegate", "Modern API - Mobile network detected");
+                getIPFromNetworkInterface();
+                return;
+            }
+            
+            finishWithError("unavailable", "Not connected to WiFi or Mobile network");
+        } else {
+            // Fallback to legacy API for Android 9 and below
+            NetworkInfo info = connectivityManager.getActiveNetworkInfo();
+            if (info != null && info.isConnected()) {
+                if (info.getType() == ConnectivityManager.TYPE_MOBILE) {
+                    android.util.Log.d("WifiDelegate", "Legacy API - Mobile network detected");
+                    getIPFromNetworkInterface();
+                } else if (info.getType() == ConnectivityManager.TYPE_WIFI) {
+                    if (wifiManager != null) {
+                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                        if (wifiInfo != null) {
+                            String ipAddress = intIP2StringIP(wifiInfo.getIpAddress());
+                            android.util.Log.d("WifiDelegate", "Legacy API - WiFi IP: " + ipAddress);
+                            result.success(ipAddress);
+                            clearMethodCallAndResult();
+                            return;
                         }
                     }
-                } catch (SocketException e) {
-                    e.printStackTrace();
                 }
-            } else if (info.getType() == ConnectivityManager.TYPE_WIFI) {
-                WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-                String ipAddress = intIP2StringIP(wifiInfo.getIpAddress());
-                result.success(ipAddress);
-                clearMethodCallAndResult();
             }
-        } else {
             finishWithError("unavailable", "ip not available.");
+        }
+    }
+    
+    /**
+     * Helper method to get IP address from NetworkInterface (for mobile networks)
+     */
+    private void getIPFromNetworkInterface() {
+        try {
+            for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements(); ) {
+                NetworkInterface intf = en.nextElement();
+                for (Enumeration<InetAddress> enumIpAddr = intf.getInetAddresses(); enumIpAddr.hasMoreElements(); ) {
+                    InetAddress inetAddress = enumIpAddr.nextElement();
+                    if (!inetAddress.isLoopbackAddress() && inetAddress instanceof Inet4Address) {
+                        String ipAddress = inetAddress.getHostAddress();
+                        android.util.Log.d("WifiDelegate", "Mobile IP from NetworkInterface: " + ipAddress);
+                        result.success(ipAddress);
+                        clearMethodCallAndResult();
+                        return;
+                    }
+                }
+            }
+            finishWithError("unavailable", "Could not find IP address from network interfaces");
+        } catch (SocketException e) {
+            android.util.Log.e("WifiDelegate", "SocketException while getting IP: " + e.getMessage());
+            finishWithError("unavailable", "Error getting IP address: " + e.getMessage());
         }
     }
 
@@ -169,10 +413,8 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
             finishWithAlreadyActiveError();
             return;
         }
-        if (!permissionManager.isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)) {
-            permissionManager.askForPermission(Manifest.permission.ACCESS_FINE_LOCATION, REQUEST_ACCESS_FINE_LOCATION_PERMISSION);
-            return;
-        }
+        
+        // No permission checks - Flutter handles all permission logic
         launchWifiList();
     }
 
@@ -215,10 +457,8 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
             finishWithAlreadyActiveError();
             return;
         }
-        if (!permissionManager.isPermissionGranted(Manifest.permission.CHANGE_WIFI_STATE)) {
-            permissionManager.askForPermission(Manifest.permission.CHANGE_WIFI_STATE, REQUEST_ACCESS_FINE_LOCATION_PERMISSION);
-            return;
-        }
+        
+        // No permission checks - manifest handles CHANGE_WIFI_STATE (normal permission)
         connection();
     }
 
@@ -283,6 +523,21 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
         }
         return null;
     }
+    
+    private boolean isLocationEnabled() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            LocationManager locationManager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+            return locationManager != null && locationManager.isLocationEnabled();
+        } else {
+            int locationMode = 0;
+            try {
+                locationMode = Settings.Secure.getInt(activity.getContentResolver(), Settings.Secure.LOCATION_MODE);
+            } catch (Settings.SettingNotFoundException e) {
+                e.printStackTrace();
+            }
+            return locationMode != Settings.Secure.LOCATION_MODE_OFF;
+        }
+    }
 
     private boolean setPendingMethodCallAndResult(MethodCall methodCall, MethodChannel.Result result) {
         if (this.result != null) {
@@ -295,25 +550,12 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
 
     @Override
     public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        boolean permissionGranted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-        switch (requestCode) {
-            case REQUEST_ACCESS_FINE_LOCATION_PERMISSION:
-                if (permissionGranted) {
-                    launchWifiList();
-                }
-                break;
-            case REQUEST_CHANGE_WIFI_STATE_PERMISSION:
-                if (permissionGranted) {
-                    connection();
-                }
-                break;
-            default:
-                return false;
-        }
-        if (!permissionGranted) {
-            clearMethodCallAndResult();
-        }
-        return true;
+        // NOTE: This callback is no longer used since permission requests are handled in Flutter
+        // using permission_handler package. Native code only checks permissions, doesn't request them.
+        // Keeping this method for backward compatibility, but it should not be triggered.
+        
+        android.util.Log.w("WifiDelegate", "onRequestPermissionsResult called - this should be handled in Flutter layer");
+        return false;
     }
 
     private void finishWithAlreadyActiveError() {

@@ -3,6 +3,7 @@
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <NetworkExtension/NEHotspotConfigurationManager.h>
+#import <NetworkExtension/NEHotspotNetwork.h>
 
 @implementation WifiPlugin
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
@@ -15,13 +16,25 @@
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
     if ([@"ssid" isEqualToString:call.method]) {
-        NSString *wifiName = [self getSSID];
-        if ([wifiName isEqualToString: @"Not Found"]) {
-            result([FlutterError errorWithCode:@"UNAVAILABLE"
-                                       message:@"wifi name unavailable"
-                                       details:nil]);
+        if (@available(iOS 14.0, *)) {
+            [NEHotspotNetwork fetchCurrentWithCompletionHandler:^(NEHotspotNetwork * _Nullable network) {
+                if (network && network.SSID && network.SSID.length > 0) {
+                    result(network.SSID);
+                } else {
+                    result([FlutterError errorWithCode:@"UNAVAILABLE"
+                                               message:@"wifi name unavailable"
+                                               details:nil]);
+                }
+            }];
         } else {
-            result(wifiName);
+            NSString *wifiName = [self getSSIDLegacy];
+            if ([wifiName isEqualToString: @"Not Found"]) {
+                result([FlutterError errorWithCode:@"UNAVAILABLE"
+                                           message:@"wifi name unavailable"
+                                           details:nil]);
+            } else {
+                result(wifiName);
+            }
         }
     } else if ([@"level" isEqualToString:call.method]) {
         NSNumber *level = @([self getSignalStrength]);
@@ -58,7 +71,7 @@
     }
 }
 
-- (NSString *) getSSID {
+- (NSString *) getSSIDLegacy {
     NSString *ssid = @"Not Found";
     CFArrayRef myArray = CNCopySupportedInterfaces();
     if (myArray != nil) {
@@ -67,6 +80,7 @@
             NSDictionary *dict = (NSDictionary*)CFBridgingRelease(myDict);
             ssid = [dict valueForKey:@"SSID"];
         }
+        CFRelease(myArray);
     }
     return ssid;
 }

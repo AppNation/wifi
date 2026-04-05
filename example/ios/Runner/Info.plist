@@ -47,10 +47,12 @@
     <string>Your prompt</string>
     <key>NSContactsUsageDescription</key>
     <string>Your prompt</string>
-    <key>NSLocationAlwaysUsageDescription</key>
-    <string>Your prompt</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+    <string>This app needs access to your location to retrieve Wi-Fi network information.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>This app needs access to your location to retrieve Wi-Fi network information.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Your prompt</string>
+    <string>This app needs access to your location to retrieve Wi-Fi network information.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Your prompt</string>
     <key>NSPhotoLibraryUsageDescription</key>
