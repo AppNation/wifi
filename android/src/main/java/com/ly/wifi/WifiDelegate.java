@@ -111,88 +111,170 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
             getSSIDLegacy();
         }
     }
-    
-    /**
-     * Modern method to get SSID using ConnectivityManager + NetworkCapabilities
-     * Works on Android 10+ (API 29+)
-     */
+
     private void getSSIDModern() {
-        android.util.Log.d("WifiDelegate", "Using modern ConnectivityManager API");
-        
-        ConnectivityManager connectivityManager = 
-            (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
-        
-        if (connectivityManager == null) {
-            finishWithError("unavailable", "ConnectivityManager is not available");
-            return;
-        }
-        
-        Network network = connectivityManager.getActiveNetwork();
-        if (network == null) {
-            android.util.Log.e("WifiDelegate", "No active network");
-            finishWithError("unavailable", "No active network connection");
-            return;
-        }
-        
-        NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
-        if (capabilities == null) {
-            android.util.Log.e("WifiDelegate", "NetworkCapabilities is null");
-            finishWithError("unavailable", "Network capabilities not available");
-            return;
-        }
-        
-        // Check if connected to WiFi
-        if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-            android.util.Log.e("WifiDelegate", "Not connected to WiFi");
-            finishWithError("unavailable", "Device is not connected to Wi-Fi");
-            return;
-        }
-        
-        // Get WifiInfo from NetworkCapabilities (Android 10+)
-        WifiInfo wifiInfo = (WifiInfo) capabilities.getTransportInfo();
-        if (wifiInfo == null) {
-            android.util.Log.e("WifiDelegate", "WifiInfo from NetworkCapabilities is null");
-            finishWithError("unavailable", "Wi-Fi connection info not available");
-            return;
-        }
-        
-        String wifiName = wifiInfo.getSSID();
-        
-        // Detailed logging
-        android.util.Log.d("WifiDelegate", "Modern API - Raw SSID: '" + wifiName + "'");
-        android.util.Log.d("WifiDelegate", "Modern API - Network ID: " + wifiInfo.getNetworkId());
-        android.util.Log.d("WifiDelegate", "Modern API - BSSID: " + wifiInfo.getBSSID());
-        android.util.Log.d("WifiDelegate", "Modern API - Link Speed: " + wifiInfo.getLinkSpeed());
-        android.util.Log.d("WifiDelegate", "Modern API - RSSI: " + wifiInfo.getRssi());
-        
-        // Check for unknown SSID
-        if (wifiName == null || wifiName.isEmpty() || 
-            wifiName.equals(WifiManager.UNKNOWN_SSID) || 
-            wifiName.equals("<unknown ssid>")) {
-            
-            String detailedError = "Wi-Fi SSID not available via modern API. ";
-            if (wifiName == null) {
-                detailedError += "SSID is null. ";
-            } else if (wifiName.isEmpty()) {
-                detailedError += "SSID is empty. ";
-            } else if (wifiName.equals(WifiManager.UNKNOWN_SSID)) {
-                detailedError += "SSID is UNKNOWN_SSID. ";
-            } else {
-                detailedError += "SSID is '<unknown ssid>'. ";
-            }
-            detailedError += "This usually means location permission is not granted or location services are disabled.";
-            
-            android.util.Log.e("WifiDelegate", detailedError);
-            finishWithError("unavailable", detailedError);
-            return;
-        }
-        
-        // Remove quotes from SSID
-        wifiName = wifiName.replace("\"", "");
-        android.util.Log.d("WifiDelegate", "Modern API - Final SSID: '" + wifiName + "'");
-        result.success(wifiName);
-        clearMethodCallAndResult();
+    Context context = activity.getApplicationContext();
+
+    // 1. Permission check
+    if (!hasLocationPermission()) {
+        finishWithError("permission_denied", "Location permission not granted");
+        return;
     }
+
+    // 2. Location service check
+    if (!isLocationEnabled(context)) {
+        finishWithError("location_disabled", "Location services are disabled");
+        return;
+    }
+
+    // 3. Try to get SSID with retry (timing fix)
+    getSSIDWithRetry(3, 300);
+}
+
+private void getSSIDWithRetry(int retryCount, long delayMs) {
+    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+
+        String ssid = getSSIDInternal();
+
+        if (ssid == null || ssid.equals("<unknown ssid>")) {
+            if (retryCount > 0) {
+                android.util.Log.w("WifiDelegate", "SSID unknown, retrying... attempts left: " + retryCount);
+                getSSIDWithRetry(retryCount - 1, delayMs);
+            } else {
+                finishWithError("unavailable", "Unable to fetch SSID after retries");
+            }
+        } else {
+            result.success(ssid);
+            clearMethodCallAndResult();
+        }
+
+    }, delayMs);
+}
+
+private String getSSIDInternal() {
+    Context context = activity.getApplicationContext();
+
+    // --- 1. Modern API ---
+    try {
+        ConnectivityManager connectivityManager =
+                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+
+        if (connectivityManager != null) {
+            Network network = connectivityManager.getActiveNetwork();
+
+            if (network != null) {
+                NetworkCapabilities capabilities =
+                        connectivityManager.getNetworkCapabilities(network);
+
+                if (capabilities != null &&
+                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+
+                    Object transportInfo = capabilities.getTransportInfo();
+
+                    if (transportInfo instanceof WifiInfo) {
+                        WifiInfo wifiInfo = (WifiInfo) transportInfo;
+
+                        String ssid = sanitizeSSID(wifiInfo.getSSID());
+
+                        android.util.Log.d("WifiDelegate", "Modern API SSID: " + ssid);
+
+                        if (isValidSSID(ssid)) {
+                            return ssid;
+                        }
+                    } else {
+                        android.util.Log.w("WifiDelegate", "TransportInfo is not WifiInfo");
+                    }
+                }
+            }
+        }
+    } catch (Exception e) {
+        android.util.Log.e("WifiDelegate", "Modern API failed", e);
+    }
+
+    // --- 2. Fallback: WifiManager ---
+    try {
+        WifiManager wifiManager =
+                (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+
+        if (wifiManager != null) {
+            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+
+            if (wifiInfo != null) {
+                String ssid = sanitizeSSID(wifiInfo.getSSID());
+
+                android.util.Log.d("WifiDelegate", "Fallback SSID: " + ssid);
+
+                if (isValidSSID(ssid)) {
+                    return ssid;
+                }
+            }
+        }
+    } catch (Exception e) {
+        android.util.Log.e("WifiDelegate", "WifiManager fallback failed", e);
+    }
+
+    return null;
+}
+
+private String sanitizeSSID(String ssid) {
+    if (ssid == null) return null;
+
+    ssid = ssid.replace("\"", "");
+
+    if (ssid.equalsIgnoreCase("unknown ssid") ||
+            ssid.equalsIgnoreCase("<unknown ssid>") ||
+            ssid.equalsIgnoreCase(WifiManager.UNKNOWN_SSID)) {
+        return null;
+    }
+
+    return ssid;
+}
+
+private boolean isValidSSID(String ssid) {
+    return ssid != null && !ssid.trim().isEmpty();
+}
+
+private boolean hasLocationPermission() {
+
+    if (activity == null) return false;
+
+    int coarse = ActivityCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+    );
+
+    int fine = ActivityCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.ACCESS_FINE_LOCATION
+    );
+
+    android.util.Log.d("WifiDelegate", "COARSE: " + coarse);
+    android.util.Log.d("WifiDelegate", "FINE: " + fine);
+
+    boolean coarseGranted = coarse == PackageManager.PERMISSION_GRANTED;
+    boolean fineGranted = fine == PackageManager.PERMISSION_GRANTED;
+
+    // 🔥 önemli değişiklik: COARSE yeterli kabul ediyoruz
+    if (android.os.Build.VERSION.SDK_INT >= 29) {
+        return coarseGranted || fineGranted;
+    }
+
+    return coarseGranted;
+}
+
+private boolean isLocationEnabled(Context context) {
+    LocationManager locationManager =
+            (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+
+    if (locationManager == null) return false;
+
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+        return locationManager.isLocationEnabled();
+    } else {
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+    }
+}
     
     /**
      * Legacy method to get SSID using WifiManager
