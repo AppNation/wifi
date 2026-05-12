@@ -132,7 +132,18 @@ WifiDelegate implements PluginRegistry.RequestPermissionsResultListener {
 }
 
 private void getSSIDWithRetry(int retryCount, long delayMs) {
+    final MethodChannel.Result capturedResult = this.result;
+
+    if (capturedResult == null) {
+        android.util.Log.w("WifiDelegate", "getSSIDWithRetry called with null result, aborting");
+        return;
+    }
+
     new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+        if (this.result == null || this.result != capturedResult) {
+            android.util.Log.w("WifiDelegate", "Result was invalidated before callback fired, aborting");
+            return;
+        }
 
         String ssid = getSSIDInternal();
 
@@ -141,10 +152,12 @@ private void getSSIDWithRetry(int retryCount, long delayMs) {
                 android.util.Log.w("WifiDelegate", "SSID unknown, retrying... attempts left: " + retryCount);
                 getSSIDWithRetry(retryCount - 1, delayMs);
             } else {
-                finishWithError("unavailable", "Unable to fetch SSID after retries");
+                android.util.Log.e("WifiDelegate", "SSID could not be resolved after all retries");
+                capturedResult.error("unavailable", "Unable to fetch SSID after retries", null);
+                clearMethodCallAndResult();
             }
         } else {
-            result.success(ssid);
+            capturedResult.success(ssid);
             clearMethodCallAndResult();
         }
 
@@ -641,10 +654,15 @@ private boolean isLocationEnabled(Context context) {
     }
 
     private void finishWithAlreadyActiveError() {
+        if (result == null) return;
         finishWithError("already_active", "wifi is already active");
     }
 
     private void finishWithError(String errorCode, String errorMessage) {
+        if (result == null) {
+            android.util.Log.w("WifiDelegate", "finishWithError called with null result [" + errorCode + "] " + errorMessage);
+            return;
+        }
         result.error(errorCode, errorMessage, null);
         clearMethodCallAndResult();
     }
@@ -663,12 +681,15 @@ private boolean isLocationEnabled(Context context) {
         @Override
         public void onReceive(Context context, Intent intent) {
             NetworkInfo info = intent.getParcelableExtra(ConnectivityManager.EXTRA_NETWORK_INFO);
-            if (info.getState() == NetworkInfo.State.DISCONNECTED && willLink) {
+            if (info == null || !willLink) return;
+            if (info.getState() == NetworkInfo.State.DISCONNECTED) {
                 wifiManager.enableNetwork(netId, true);
                 wifiManager.reconnect();
-                result.success(1);
                 willLink = false;
-                clearMethodCallAndResult();
+                if (result != null) {
+                    result.success(1);
+                    clearMethodCallAndResult();
+                }
             }
         }
 
